@@ -1,6 +1,6 @@
 import getpass
 import os
-import sqlite3
+import psycopg2
 import discord
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta
@@ -17,21 +17,28 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ==========================================
 STUDY_CHANNEL_ID = 1323411341033341020  # آي دي قناة الشات المخصصة للصور
 VOICE_CHANNEL_ID = 1323411341192597558  # آي دي روم المذاكرة الصوتية
-STUDY_TIMEOUT_MINUTES = 6              # <--- (مكان تغيير التوقيت هنا): اخليه 1 للاختبار أو 25 للاستخدام الفعلي
+STUDY_TIMEOUT_MINUTES = 25              # مهلة إرسال الصورة (بالدقائق)
 # ==========================================
+
+# رابط قاعدة البيانات السحابية من متغيرات البيئة
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # القواميس المؤقتة في الذاكرة
 user_last_proof = {}  # {user_id: datetime}
 user_join_time = {}   # {user_id: datetime}
 warned_users = set()  # لتتبع من تم تنبيهه لمنع الإزعاج
 
+def get_db_connection():
+    """اتصال بقاعدة البيانات السحابية PostgreSQL"""
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
+
 def init_db():
-    """إنشاء قاعدة البيانات المحلية لتفادي فقدان البيانات عند إغلاق البوت"""
-    conn = sqlite3.connect("study_bot.db")
+    """إنشاء الجدول في قاعدة البيانات السحابية إذا لم يكن موجوداً"""
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_stats (
-            user_id INTEGER PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             daily INTEGER DEFAULT 0,
             weekly INTEGER DEFAULT 0,
             monthly INTEGER DEFAULT 0,
@@ -40,6 +47,7 @@ def init_db():
         )
     ''')
     conn.commit()
+    cursor.close()
     conn.close()
 
 def get_current_date_week():
@@ -47,13 +55,13 @@ def get_current_date_week():
     return now.strftime("%Y-%m-%d"), now.isocalendar()[1]
 
 def update_user_minutes(user_id, minutes):
-    """تحديث الدقائق في قاعدة البيانات مع معالجة التصفير اليومي والأسبوعي"""
+    """تحديث الدقائق في السحابة مع معالجة التصفير اليومي والأسبوعي"""
     today_str, current_week = get_current_date_week()
     
-    conn = sqlite3.connect("study_bot.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute("SELECT daily, weekly, monthly, last_date, last_week FROM user_stats WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT daily, weekly, monthly, last_date, last_week FROM user_stats WHERE user_id = %s", (user_id,))
     row = cursor.fetchone()
     
     if row:
@@ -73,22 +81,26 @@ def update_user_minutes(user_id, minutes):
         
         cursor.execute('''
             UPDATE user_stats 
-            SET daily = ?, weekly = ?, monthly = ?, last_date = ?, last_week = ?
-            WHERE user_id = ?
+            SET daily = %s, weekly = %s, monthly = %s, last_date = %s, last_week = %s
+            WHERE user_id = %s
         ''', (daily, weekly, monthly, last_date, last_week, user_id))
     else:
         cursor.execute('''
             INSERT INTO user_stats (user_id, daily, weekly, monthly, last_date, last_week)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         ''', (user_id, minutes, minutes, minutes, today_str, current_week))
         
     conn.commit()
+    cursor.close()
     conn.close()
 
 @bot.event
 async def on_ready():
-    init_db()
-    print(f'تم تسجيل الدخول بنجاح باسم: {bot.user.name} والقاعدة تعمل بكفاءة!')
+    if DATABASE_URL:
+        init_db()
+        print(f'تم تسجيل الدخول بنجاح باسم: {bot.user.name} ومتصل بقاعدة البيانات السحابية بنجاح!')
+    else:
+        print("⚠️ تنبيه: لم يتم العثور على رابط قاعدة البيانات DATABASE_URL!")
     check_study_proofs.start()
 
 # تتبع دخول وخروج الأعضاء من الروم الصوتية
@@ -129,22 +141,17 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# ==========================================
-# ⏱️ أمر معرفة الوقت الباقي (بالدقائق والثواني)
-# ==========================================
+# أمر الوقت الباقي
 @bot.command(name="remaining", aliases=["باقي", "الوقت"])
 async def check_remaining_time(ctx):
     user_id = ctx.author.id
     
-    # التأكد من أن المستخدم متواجد في الروم الصوتية أو لديه وقت مسجل
     if user_id not in user_join_time and user_id not in user_last_proof:
         await ctx.send(f"❌ {ctx.author.mention} أنت لست داخل روم المذاكرة الصوتية أو لم تبدأ جلستك بعد!")
         return
 
     now = datetime.now()
-    # تحديد نقطة البداية للمهلة الحالية (إما آخر صورة تم إرسالها أو وقت دخول الروم)
     start_time = user_last_proof.get(user_id) or user_join_time.get(user_id)
-    
     deadline = start_time + timedelta(minutes=STUDY_TIMEOUT_MINUTES)
     remaining_delta = deadline - now
     
@@ -164,10 +171,11 @@ async def check_remaining_time(ctx):
 async def show_stats(ctx, target_member: discord.Member = None):
     member = target_member or ctx.author
     
-    conn = sqlite3.connect("study_bot.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT daily, weekly, monthly FROM user_stats WHERE user_id = ?", (member.id,))
+    cursor.execute("SELECT daily, weekly, monthly FROM user_stats WHERE user_id = %s", (member.id,))
     row = cursor.fetchone()
+    cursor.close()
     conn.close()
     
     daily, weekly, monthly = (row[0], row[1], row[2]) if row else (0, 0, 0)
@@ -198,10 +206,11 @@ async def show_stats(ctx, target_member: discord.Member = None):
 # أمر المتصدرين
 @bot.command(name="top", aliases=["المتصدرين"])
 async def leaderboard(ctx):
-    conn = sqlite3.connect("study_bot.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, weekly FROM user_stats")
     rows = cursor.fetchall()
+    cursor.close()
     conn.close()
 
     totals = {row[0]: row[1] for row in rows}
@@ -231,7 +240,7 @@ async def leaderboard(ctx):
     embed.description = description
     await ctx.send(embed=embed)
 
-# اللوب المسؤول عن التحذير قبل 5 دقائق والطرد
+# اللوب المسؤول عن التحذير والطرد
 @tasks.loop(minutes=1)
 async def check_study_proofs():
     voice_channel = bot.get_channel(VOICE_CHANNEL_ID)
