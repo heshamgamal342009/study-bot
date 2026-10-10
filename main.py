@@ -44,13 +44,14 @@ def init_db():
             monthly INTEGER DEFAULT 0,
             last_date TEXT,
             last_week INTEGER,
-            remaining_proof_minutes INTEGER DEFAULT 25
+            remaining_proof_minutes INTEGER DEFAULT 25,
+            current_join_time TIMESTAMP WITH TIME ZONE
         )
     ''')
-    # للتأكد من إضافة عمود المهلة المتبقية إذا كانت الجدول قديم
     cursor.execute('''
         ALTER TABLE user_stats 
-        ADD COLUMN IF NOT EXISTS remaining_proof_minutes INTEGER DEFAULT 25;
+        ADD COLUMN IF NOT EXISTS remaining_proof_minutes INTEGER DEFAULT 25,
+        ADD COLUMN IF NOT EXISTS current_join_time TIMESTAMP WITH TIME ZONE;
     ''')
     conn.commit()
     cursor.close()
@@ -75,6 +76,8 @@ def get_current_date_week():
     return now.strftime("%Y-%m-%d"), now.isocalendar()[1]
 
 def update_user_minutes(user_id, minutes):
+    if minutes <= 0:
+        return
     today_str, current_week = get_current_date_week()
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -84,7 +87,6 @@ def update_user_minutes(user_id, minutes):
     
     if row:
         daily, weekly, monthly, last_date, last_week, remaining_proof = row
-        # تجديد يومي للميل والساعات والمهلة
         if last_date != today_str:
             daily = 0
             last_date = today_str
@@ -113,7 +115,6 @@ def update_user_minutes(user_id, minutes):
     conn.close()
 
 def get_or_reset_user_remaining_minutes(user_id):
-    """جلب وقت المهلة المتبقي للعضو وتجديده تلقائياً لـ 25 دقيقة لو دخل في يوم جديد"""
     today_str, _ = get_current_date_week()
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -134,7 +135,6 @@ def get_or_reset_user_remaining_minutes(user_id):
     return remaining_mins
 
 def set_user_remaining_minutes(user_id, minutes):
-    """حفظ وقت المهلة المتبقي في الداتا بيز"""
     today_str, current_week = get_current_date_week()
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -147,6 +147,23 @@ def set_user_remaining_minutes(user_id, minutes):
     conn.commit()
     cursor.close()
     conn.close()
+
+def set_user_join_timestamp(user_id, timestamp):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE user_stats SET current_join_time = %s WHERE user_id = %s", (timestamp, user_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def get_user_join_timestamp(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT current_join_time FROM user_stats WHERE user_id = %s", (user_id,))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row[0] if row else None
 
 @bot.event
 async def on_ready():
@@ -164,7 +181,6 @@ async def on_ready():
     daily_summary_task.start()
     update_roles_task.start()
 
-# معالجة حركات الصوت وقراءة الوقت الفعلي من الداتا بيز
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
@@ -173,11 +189,11 @@ async def on_voice_state_update(member, before, after):
     study_channel = bot.get_channel(STUDY_CHANNEL_ID)
     now = datetime.now(EGYPT_TZ)
 
-    # 1️⃣ عند دخول العضو لروم المذاكرة الصوتية
+    # 1️⃣ عند دخول الروم الصوتي
     if after.channel and after.channel.id == VOICE_CHANNEL_ID and before.channel != after.channel:
         user_join_time[member.id] = now
+        set_user_join_timestamp(member.id, now)
         
-        # جلب الوقت المتبقي الفعلي المسجل في الداتا بيز (وتجديده لـ 25 لو يوم جديد)
         remaining_mins = get_or_reset_user_remaining_minutes(member.id)
         
         if study_channel:
@@ -186,61 +202,65 @@ async def on_voice_state_update(member, before, after):
                 f"معك مهلة **{remaining_mins} دقيقة** لإرسال أول إثبات 📸⏳"
             )
 
-    # 2️⃣ عند خروج العضو من روم المذاكرة الصوتية
+    # 2️⃣ عند الخروج من الروم الصوتي (حساب دقيق ثايت ومسجل)
     elif before.channel and before.channel.id == VOICE_CHANNEL_ID and after.channel != before.channel:
-        if member.id in user_join_time:
-            time_spent = now - user_join_time[member.id]
-            session_minutes = int(time_spent.total_seconds() // 60)
+        db_join_time = get_user_join_timestamp(member.id)
+        start_time = user_join_time.get(member.id) or db_join_time or now
+        
+        time_spent = now - start_time
+        session_minutes = int(time_spent.total_seconds() // 60)
+        
+        if session_minutes > 0:
+            update_user_minutes(member.id, session_minutes)
+
+        # حساب مهلة الإثبات المتبقية بدقة
+        last_time = user_last_proof.get(member.id) or start_time
+        elapsed = int((now - last_time).total_seconds() // 60)
+        
+        current_remaining = get_or_reset_user_remaining_minutes(member.id)
+        new_remaining = max(0, current_remaining - elapsed)
+        set_user_remaining_minutes(member.id, new_remaining)
+
+        # مسح أوقات الجلسة الصوتية
+        user_join_time.pop(member.id, None)
+        set_user_join_timestamp(member.id, None)
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT daily, weekly FROM user_stats WHERE user_id = %s", (member.id,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        daily_total = row[0] if row else session_minutes
+        weekly_total = row[1] if row else session_minutes
+
+        if study_channel:
+            hours_daily = round(daily_total / 60, 1)
+            hours_weekly = round(weekly_total / 60, 1)
             
-            if session_minutes > 0:
-                update_user_minutes(member.id, session_minutes)
-
-            # حساب الدقائق المتبقية للمهلة وحفظها في قاعدة البيانات
-            last_time = user_last_proof.get(member.id) or user_join_time.get(member.id)
-            elapsed = int((now - last_time).total_seconds() // 60)
-            
-            current_remaining = get_or_reset_user_remaining_minutes(member.id)
-            new_remaining = max(0, current_remaining - elapsed)
-            set_user_remaining_minutes(member.id, new_remaining)
-
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT daily, weekly FROM user_stats WHERE user_id = %s", (member.id,))
-            row = cursor.fetchone()
-            cursor.close()
-            conn.close()
-
-            daily_total = row[0] if row else session_minutes
-            weekly_total = row[1] if row else session_minutes
-
-            if study_channel:
-                hours_daily = round(daily_total / 60, 1)
-                hours_weekly = round(weekly_total / 60, 1)
-                
-                msg = (
-                    f"👋 **الله ينور يا {member.mention}!** خرجت من روم المذاكرة.\n"
-                    f"⏱️ **إنجازك في جلسة اليوم الأخيرة:** `{session_minutes}` دقيقة.\n"
-                    f"📊 **رصيدك التراكمي المحفوظ:**\n"
-                    f"• مجموع اليوم: **{daily_total}** دقيقة ({hours_daily} ساعة)\n"
-                    f"• مجموع الأسبوع: **{weekly_total}** دقيقة ({hours_weekly} ساعة)\n"
-                    f"⏳ **المهلة المتبقية لك للإثبات المقادم:** `{new_remaining}` دقيقة.\n"
-                    f"✨ رصيدك محفوظ وجاهز لما ترجع تدخل تاني، كمل يا بطل! 💪"
-                )
-                await study_channel.send(msg)
+            msg = (
+                f"👋 **الله ينور يا {member.mention}!** خرجت من روم المذاكرة.\n"
+                f"⏱️ **إنجازك في الجلسة الأخيرة:** `{session_minutes}` دقيقة.\n"
+                f"📊 **رصيدك التراكمي المحفوظ:**\n"
+                f"• مجموع اليوم: **{daily_total}** دقيقة ({hours_daily} ساعة)\n"
+                f"• مجموع الأسبوع: **{weekly_total}** دقيقة ({hours_weekly} ساعة)\n"
+                f"⏳ **المهلة المتبقية للإثبات:** `{new_remaining}` دقيقة.\n"
+                f"✨ رصيدك محفوظ ومضمون 100%! 💪"
+            )
+            await study_channel.send(msg)
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    # استقبال الإثبات وتجديد مهلة الـ 25 دقيقة بالكامل في قاعدة البيانات
     if message.channel.id == STUDY_CHANNEL_ID and message.attachments:
         if any(att.content_type and att.content_type.startswith('image/') for att in message.attachments):
             now = datetime.now(EGYPT_TZ)
             user_last_proof[message.author.id] = now
             warned_users.discard(message.author.id)
             
-            # إعادة ضبط المهلة إلى 25 دقيقة كاملة في الداتا بيز
             set_user_remaining_minutes(message.author.id, STUDY_TIMEOUT_MINUTES)
             
             next_deadline = now + timedelta(minutes=STUDY_TIMEOUT_MINUTES)
@@ -271,7 +291,6 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# أمر الوقت الباقي بناءً على الداتا بيز والوقت الحالي
 @bot.command(name="remaining", aliases=["باقي", "الوقت", "الباقي"])
 async def check_remaining_time(ctx):
     user_id = ctx.author.id
@@ -280,7 +299,7 @@ async def check_remaining_time(ctx):
         return
 
     now = datetime.now(EGYPT_TZ)
-    start_time = user_last_proof.get(user_id) or user_join_time.get(user_id)
+    start_time = user_last_proof.get(user_id) or user_join_time.get(user_id) or now
     db_remaining = get_or_reset_user_remaining_minutes(user_id)
     
     deadline = start_time + timedelta(minutes=db_remaining)
@@ -295,7 +314,6 @@ async def check_remaining_time(ctx):
     secs = total_seconds % 60
     await ctx.send(f"⏳ {ctx.author.mention} باقي لك **{mins} دقيقة و {secs} ثانية** على انتهاء المهلة الحالية.")
 
-# أمر الإحصائيات
 @bot.command(name="stats", aliases=["احصائيات", "إحصائيات", "ساعاتي", "معلوماتي", "ساعات", "ساعه", "وقتي", "مذاكرتي", "ستاتس", "stat"])
 async def show_stats(ctx, target_member: discord.Member = None):
     member = target_member or ctx.author
@@ -327,7 +345,6 @@ async def show_stats(ctx, target_member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
-# أمر المتصدرين
 @bot.command(name="top", aliases=["المتصدرين", "توب", "الترتيب"])
 async def leaderboard(ctx):
     try:
@@ -369,7 +386,6 @@ async def setup_roles_command(ctx):
     await create_default_roles(ctx.guild)
     await ctx.send("✅ تم إنشاء وتجهيز جميع رتب المتصدرين بنجاح! تأكد الآن من رفع رتبة البوت فوقهم في إعدادات السيرفر.")
 
-# نظام الراوندات التلقائي
 @tasks.loop(minutes=1)
 async def round_announcer():
     global last_announced_round_status
@@ -406,7 +422,6 @@ async def round_announcer():
         else:
             await study_channel.send(f"☕ **وقت البريك للراوند {round_num}!**\nخذوا راحة لمدة 30 دقيقة، ارتاحوا واشربوا مية ورجعوا أقوى! 🧘‍♂️✨")
 
-# إرسال التقارير اليومية
 @tasks.loop(hours=24)
 async def daily_summary_task():
     conn = get_db_connection()
@@ -433,7 +448,6 @@ async def daily_summary_task():
             except Exception as e:
                 print(f"تعذر إرسال رسالة خاصة لـ {SUMMARY_USERNAME}: {e}")
 
-# تحديث الرتب أوتوماتيكياً
 @tasks.loop(minutes=30)
 async def update_roles_task():
     for guild in bot.guilds:
@@ -484,7 +498,6 @@ async def update_roles_task():
         except Exception as e:
             print(f"خطأ أثناء تحديث الرتب في السيرفر {guild.name}: {e}")
 
-# التحقق من الإثباتات والإنذار والطرد مع حفظ باقي الوقت في الداتا بيز
 @tasks.loop(minutes=1)
 async def check_study_proofs():
     voice_channel = bot.get_channel(VOICE_CHANNEL_ID)
@@ -497,12 +510,9 @@ async def check_study_proofs():
         if member.bot:
             continue
         
-        last_time = user_last_proof.get(member.id)
-        if not last_time:
-            join_t = user_join_time.get(member.id, now)
-            elapsed = (now - join_t).total_seconds() / 60
-        else:
-            elapsed = (now - last_time).total_seconds() / 60
+        db_join_time = get_user_join_timestamp(member.id)
+        start_time = user_last_proof.get(member.id) or user_join_time.get(member.id) or db_join_time or now
+        elapsed = (now - start_time).total_seconds() / 60
 
         db_remaining = get_or_reset_user_remaining_minutes(member.id)
         warning_threshold = max(0, db_remaining - 5)
@@ -520,8 +530,8 @@ async def check_study_proofs():
                 warned_users.discard(member.id)
                 user_join_time.pop(member.id, None)
                 user_last_proof.pop(member.id, None)
+                set_user_join_timestamp(member.id, None)
                 
-                # تصفير المهلة المسجلة في الداتا بيز عند الطرد
                 set_user_remaining_minutes(member.id, 0)
 
                 if study_channel:
