@@ -189,7 +189,7 @@ async def on_voice_state_update(member, before, after):
     study_channel = bot.get_channel(STUDY_CHANNEL_ID)
     now = datetime.now(EGYPT_TZ)
 
-    # 1️⃣ عند دخول الروم الصوتي
+    # 1️⃣ عند الدخول لروم الصوت
     if after.channel and after.channel.id == VOICE_CHANNEL_ID and before.channel != after.channel:
         user_join_time[member.id] = now
         set_user_join_timestamp(member.id, now)
@@ -202,7 +202,7 @@ async def on_voice_state_update(member, before, after):
                 f"معك مهلة **{remaining_mins} دقيقة** لإرسال أول إثبات 📸⏳"
             )
 
-    # 2️⃣ عند الخروج من الروم الصوتي (حساب دقيق ثايت ومسجل)
+    # 2️⃣ عند الخروج من روم الصوت (مع التحقق من عدم السبام لو أقل من دقيقة)
     elif before.channel and before.channel.id == VOICE_CHANNEL_ID and after.channel != before.channel:
         db_join_time = get_user_join_timestamp(member.id)
         start_time = user_join_time.get(member.id) or db_join_time or now
@@ -210,20 +210,21 @@ async def on_voice_state_update(member, before, after):
         time_spent = now - start_time
         session_minutes = int(time_spent.total_seconds() // 60)
         
-        if session_minutes > 0:
-            update_user_minutes(member.id, session_minutes)
+        user_join_time.pop(member.id, None)
+        set_user_join_timestamp(member.id, None)
 
-        # حساب مهلة الإثبات المتبقية بدقة
+        # لو العضو دخل وخرج بسرعة (أقل من دقيقة)، نتجاهل الرسالة تماماً لمنع السبام
+        if session_minutes <= 0:
+            return
+
+        update_user_minutes(member.id, session_minutes)
+
         last_time = user_last_proof.get(member.id) or start_time
         elapsed = int((now - last_time).total_seconds() // 60)
         
         current_remaining = get_or_reset_user_remaining_minutes(member.id)
         new_remaining = max(0, current_remaining - elapsed)
         set_user_remaining_minutes(member.id, new_remaining)
-
-        # مسح أوقات الجلسة الصوتية
-        user_join_time.pop(member.id, None)
-        set_user_join_timestamp(member.id, None)
 
         conn = get_db_connection()
         cursor = conn.cursor()
