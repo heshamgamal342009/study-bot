@@ -129,7 +129,6 @@ async def on_voice_state_update(member, before, after):
     study_channel = bot.get_channel(STUDY_CHANNEL_ID)
     now = datetime.now(EGYPT_TZ)
 
-    # عند انضمام العضو للروم الصوتي
     if after.channel and after.channel.id == VOICE_CHANNEL_ID and before.channel != after.channel:
         if member.id not in user_last_proof and member.id not in user_join_time:
             user_join_time[member.id] = now
@@ -139,22 +138,18 @@ async def on_voice_state_update(member, before, after):
             if study_channel:
                 await study_channel.send(f"مرحباً بعودتك {member.mention}! ⚠️ تذكر أن مهلتك المستمرة لم تتجدد، يرجى إرسال الصورة في موعدها.")
 
-    # عند خروج العضو من الروم الصوتي
     elif before.channel and before.channel.id == VOICE_CHANNEL_ID and after.channel != before.channel:
         if member.id in user_join_time:
             time_spent = now - user_join_time[member.id]
             minutes = int(time_spent.total_seconds() // 60)
             if minutes > 0:
                 update_user_minutes(member.id, minutes)
-            
-            # نحتفظ بسجل وقته حتى لا يتلاعب بالخروج والدخول، ولا يمسح السجل إلا بعد تقديم الإثبات أو الطرد
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    # استقبال الصورة وإعادة ضبط مهلة الـ 25 دقيقة
     if message.channel.id == STUDY_CHANNEL_ID and message.attachments:
         if any(att.content_type and att.content_type.startswith('image/') for att in message.attachments):
             now = datetime.now(EGYPT_TZ)
@@ -181,7 +176,7 @@ async def on_message(message):
             if ctx.command:
                 await bot.invoke(ctx)
                 return
-        elif content in ["احصائيات", "إحصائيات", "ساعاتي", "معلوماتي", "stats"]:
+        elif content in ["احصائيات", "إحصائيات", "ساعاتي", "معلوماتي", "ساعات", "ساعه", "وقتي", "مذاكرتي", "ستاتس", "stat", "stats"]:
             ctx.command = bot.get_command("stats")
             if ctx.command:
                 await bot.invoke(ctx)
@@ -210,7 +205,8 @@ async def check_remaining_time(ctx):
     secs = total_seconds % 60
     await ctx.send(f"⏳ {ctx.author.mention} باقي لك **{mins} دقيقة و {secs} ثانية** على انتهاء المهلة الحالية.")
 
-@bot.command(name="stats", aliases=["احصائيات", "إحصائيات", "ساعاتي", "معلوماتي"])
+# أمر الإحصائيات مع كافة الاختصارات الجديدة
+@bot.command(name="stats", aliases=["احصائيات", "إحصائيات", "ساعاتي", "معلوماتي", "ساعات", "ساعه", "وقتي", "مذاكرتي", "ستاتس", "stat"])
 async def show_stats(ctx, target_member: discord.Member = None):
     member = target_member or ctx.author
     conn = get_db_connection()
@@ -388,7 +384,6 @@ async def update_roles_task():
         except Exception as e:
             print(f"خطأ أثناء تحديث الرتب في السيرفر {guild.name}: {e}")
 
-# التحقق من الإثباتات مع مسح بيانات المهلة عند الطرد فقط
 @tasks.loop(minutes=1)
 async def check_study_proofs():
     voice_channel = bot.get_channel(VOICE_CHANNEL_ID)
