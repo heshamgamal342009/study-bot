@@ -8,24 +8,24 @@ from datetime import datetime, timedelta
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-intents.members = True  # يتطلب تفعيل Server Members Intent من الديفلوبر بورتال
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==========================================
 # ⚙️ إعدادات البوت والمهلة الزمنية
 # ==========================================
-STUDY_CHANNEL_ID = 1323411341033341020  # آي دي قناة الشات المخصصة للصور
-VOICE_CHANNEL_ID = 1323411341192597558  # آي دي روم المذاكرة الصوتية
-STUDY_TIMEOUT_MINUTES = 25              # مهلة إرسال الصورة (بالدقائق)
-SUMMARY_USERNAME = "ilovemyself03821"     # يوزر الشخص الذي سيرسل له الملخص اليومي
+STUDY_CHANNEL_ID = 1323411341033341020
+VOICE_CHANNEL_ID = 1323411341192597558
+STUDY_TIMEOUT_MINUTES = 25
+SUMMARY_USERNAME = "ilovemyself03821"
 # ==========================================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-user_last_proof = {}  # {user_id: datetime}
-user_join_time = {}   # {user_id: datetime}
-warned_users = set()  # لتتبع من تم تنبيهه لمنع الإزعاج
+user_last_proof = {}
+user_join_time = {}
+warned_users = set()
 last_announced_round_status = None
 
 def get_db_connection():
@@ -49,7 +49,6 @@ def init_db():
     conn.close()
 
 async def create_default_roles(guild):
-    """إنشاء الرتب تلقائياً إذا لم تكن موجودة"""
     role_names = {1: "Top 1", 2: "Top 2", 3: "Top 3", 4: "Top 4", 5: "Top 5"}
     da7e7_role_name = "الدحيح الشهر"
 
@@ -119,7 +118,6 @@ async def on_ready():
     daily_summary_task.start()
     update_roles_task.start()
 
-# تتبع الدخول والخروج مع الترحيب الفوري
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
@@ -130,7 +128,7 @@ async def on_voice_state_update(member, before, after):
     if after.channel and after.channel.id == VOICE_CHANNEL_ID and before.channel != after.channel:
         user_join_time[member.id] = datetime.now()
         if study_channel:
-            await study_channel.send(f" أهلاً بك يا {member.mention}! تم تسجيل دخولك لروم المذاكرة الصوتية. معك مهلة **{STUDY_TIMEOUT_MINUTES} دقيقة** لإرسال أول إثبات مذاكرة 📸⏳")
+            await study_channel.send(f"أهلاً بك يا {member.mention}! تم تسجيل دخولك لروم المذاكرة الصوتية. معك مهلة **{STUDY_TIMEOUT_MINUTES} دقيقة** لإرسال أول إثبات مذاكرة 📸⏳")
 
     elif before.channel and before.channel.id == VOICE_CHANNEL_ID and after.channel != before.channel:
         if member.id in user_join_time:
@@ -142,13 +140,11 @@ async def on_voice_state_update(member, before, after):
             user_last_proof.pop(member.id, None)
             warned_users.discard(member.id)
 
-# معالجة الرسائل والأوامر (مع وبدون بريفيكس)
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    # استقبال إثبات المذاكرة بالصور
     if message.channel.id == STUDY_CHANNEL_ID and message.attachments:
         if any(att.content_type and att.content_type.startswith('image/') for att in message.attachments):
             now = datetime.now()
@@ -183,7 +179,6 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# أمر الوقت الباقي
 @bot.command(name="remaining", aliases=["باقي", "الوقت", "الباقي"])
 async def check_remaining_time(ctx):
     user_id = ctx.author.id
@@ -205,7 +200,6 @@ async def check_remaining_time(ctx):
     secs = total_seconds % 60
     await ctx.send(f"⏳ {ctx.author.mention} باقي لك **{mins} دقيقة و {secs} ثانية** على انتهاء المهلة الحالية.")
 
-# أمر إحصائيات المستخدم الفردي
 @bot.command(name="stats", aliases=["احصائيات", "إحصائيات", "ساعاتي", "معلوماتي"])
 async def show_stats(ctx, target_member: discord.Member = None):
     member = target_member or ctx.author
@@ -237,7 +231,6 @@ async def show_stats(ctx, target_member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
-# أمر المتصدرين المصلح والمحسّن
 @bot.command(name="top", aliases=["المتصدرين", "توب", "الترتيب"])
 async def leaderboard(ctx):
     try:
@@ -273,7 +266,6 @@ async def leaderboard(ctx):
         await ctx.send(f"حدث خطأ أثناء جلب قائمة المتصدرين: {e}")
         print(f"Error in leaderboard command: {e}")
 
-# نظام الراوندات التلقائي
 @tasks.loop(minutes=1)
 async def round_announcer():
     global last_announced_round_status
@@ -290,7 +282,7 @@ async def round_announcer():
     if diff_mins < 0:
         return
     
-    cycle_mins = 150  # 120 دقيقة مذاكرة + 30 دقيقة بريك
+    cycle_mins = 150
     position_in_cycle = diff_mins % cycle_mins
     round_num = (diff_mins // cycle_mins) + 1
     
@@ -305,7 +297,6 @@ async def round_announcer():
             last_announced_round_status = status
             await study_channel.send(f"☕ **وقت البريك للراوند {round_num}!**\nخذوا راحة لمدة 30 دقيقة، ارتاحوا واشربوا مية ورجعوا أقوى! 🧘‍♂️✨")
 
-# إرسال الملخص اليومي
 @tasks.loop(hours=24)
 async def daily_summary_task():
     conn = get_db_connection()
@@ -332,7 +323,6 @@ async def daily_summary_task():
             except Exception as e:
                 print(f"تعذر إرسال رسالة خاصة لـ {SUMMARY_USERNAME}: {e}")
 
-# تحديث وتوزيع الرتب أوتوماتيكياً
 @tasks.loop(minutes=30)
 async def update_roles_task():
     for guild in bot.guilds:
@@ -383,7 +373,6 @@ async def update_roles_task():
         except Exception as e:
             print(f"خطأ أثناء تحديث الرتب في السيرفر {guild.name}: {e}")
 
-# اللوب المسؤول عن التحذير والطرد
 @tasks.loop(minutes=1)
 async def check_study_proofs():
     voice_channel = bot.get_channel(VOICE_CHANNEL_ID)
