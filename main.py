@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-intents.members = True
+intents.members = True  # يتطلب تفعيل Server Members Intent من الديفلوبر بورتال
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -111,7 +111,6 @@ async def on_ready():
     else:
         print("⚠️ تنبيه: لم يتم العثور على رابط قاعدة البيانات DATABASE_URL!")
     
-    # إنشاء الرتب في كل السيرفرات فور تشغيل البوت
     for guild in bot.guilds:
         await create_default_roles(guild)
 
@@ -162,7 +161,6 @@ async def on_message(message):
             await message.add_reaction("✅")
             await message.reply(f"تمام عاش يا بطل! تم تسجيل إثبات المذاكرة. معاك مهلة لحد الساعة **{formatted_time}** ⏳")
 
-    # دعم الأوامر بدون بريفيكس (!)
     content = message.content.strip().lower()
     ctx = await bot.get_context(message)
     
@@ -239,48 +237,41 @@ async def show_stats(ctx, target_member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
-# أمر المتصدرين المصلح والمطور
+# أمر المتصدرين المصلح والمحسّن
 @bot.command(name="top", aliases=["المتصدرين", "توب", "الترتيب"])
 async def leaderboard(ctx):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, weekly FROM user_stats")
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, weekly FROM user_stats")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
 
-    totals = {row[0]: row[1] for row in rows}
-    for u_id, join_t in user_join_time.items():
-        active_mins = int((datetime.now() - join_t).total_seconds() // 60)
-        totals[u_id] = totals.get(u_id, 0) + active_mins
+        totals = {row[0]: row[1] for row in rows}
+        for u_id, join_t in user_join_time.items():
+            active_mins = int((datetime.now() - join_t).total_seconds() // 60)
+            totals[u_id] = totals.get(u_id, 0) + active_mins
 
-    if not totals:
-        await ctx.send("لا توجد بيانات مذاكرة مسجلة حتى الآن!")
-        return
+        if not totals:
+            await ctx.send("لا توجد بيانات مذاكرة مسجلة حتى الآن في السيرفر!")
+            return
 
-    sorted_users = sorted(totals.items(), key=lambda x: x[1], reverse=True)[:5]
-    
-    embed = discord.Embed(title="🏆 متصدري المذاكرة (المجموع التراكمي الأسبوعي)", color=discord.Color.gold())
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-    description = ""
-    
-    for i, (u_id, weekly_mins) in enumerate(sorted_users):
-        name = f"عضو ({u_id})"
-        if ctx.guild:
-            member = ctx.guild.get_member(u_id)
-            if member:
-                name = member.display_name
-            else:
-                try:
-                    user = await bot.fetch_user(u_id)
-                    if user:
-                        name = user.display_name
-                except Exception:
-                    pass
-        description += f"{medals[i]} **{name}**: {weekly_mins} دقيقة ({round(weekly_mins/60, 1)} ساعة)\n"
+        sorted_users = sorted(totals.items(), key=lambda x: x[1], reverse=True)[:5]
         
-    embed.description = description
-    await ctx.send(embed=embed)
+        embed = discord.Embed(title="🏆 متصدري المذاكرة (المجموع التراكمي الأسبوعي)", color=discord.Color.gold())
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+        description = ""
+        
+        for i, (u_id, weekly_mins) in enumerate(sorted_users):
+            user_mention = f"<@{u_id}>"
+            description += f"{medals[i]} {user_mention}: **{weekly_mins}** دقيقة ({round(weekly_mins/60, 1)} ساعة)\n"
+            
+        embed.description = description
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"حدث خطأ أثناء جلب قائمة المتصدرين: {e}")
+        print(f"Error in leaderboard command: {e}")
 
 # نظام الراوندات التلقائي
 @tasks.loop(minutes=1)
@@ -342,7 +333,7 @@ async def daily_summary_task():
                 print(f"تعذر إرسال رسالة خاصة لـ {SUMMARY_USERNAME}: {e}")
 
 # تحديث وتوزيع الرتب أوتوماتيكياً
-@tasks.loop(hours=1)
+@tasks.loop(minutes=30)
 async def update_roles_task():
     for guild in bot.guilds:
         try:
@@ -371,17 +362,23 @@ async def update_roles_task():
 
             for index, (u_id,) in enumerate(top_weekly):
                 pos = index + 1
-                member = guild.get_member(u_id)
-                if member and pos in role_objs and role_objs[pos]:
-                    await member.add_roles(role_objs[pos])
+                try:
+                    member = guild.get_member(u_id) or await guild.fetch_member(u_id)
+                    if member and pos in role_objs and role_objs[pos]:
+                        await member.add_roles(role_objs[pos])
+                except Exception as fetch_err:
+                    print(f"تعذر جلب العضو {u_id} لإعطائه الرتبة: {fetch_err}")
 
             if top_monthly and da7e7_role:
                 m_uid = top_monthly[0]
                 for m in da7e7_role.members:
                     await m.remove_roles(da7e7_role)
-                monthly_member = guild.get_member(m_uid)
-                if monthly_member:
-                    await monthly_member.add_roles(da7e7_role)
+                try:
+                    monthly_member = guild.get_member(m_uid) or await guild.fetch_member(m_uid)
+                    if monthly_member:
+                        await monthly_member.add_roles(da7e7_role)
+                except Exception as fetch_err:
+                    print(f"تعذر جلب العضو {m_uid} لإعطائه رتبة الدحيح: {fetch_err}")
 
         except Exception as e:
             print(f"خطأ أثناء تحديث الرتب في السيرفر {guild.name}: {e}")
