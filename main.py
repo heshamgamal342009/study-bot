@@ -48,6 +48,21 @@ def init_db():
     cursor.close()
     conn.close()
 
+async def create_default_roles(guild):
+    """إنشاء الرتب تلقائياً إذا لم تكن موجودة"""
+    role_names = {1: "Top 1", 2: "Top 2", 3: "Top 3", 4: "Top 4", 5: "Top 5"}
+    da7e7_role_name = "الدحيح الشهر"
+
+    try:
+        for pos, rname in role_names.items():
+            if not discord.utils.get(guild.roles, name=rname):
+                await guild.create_role(name=rname, reason="Study Bot Leaderboard Role")
+        
+        if not discord.utils.get(guild.roles, name=da7e7_role_name):
+            await guild.create_role(name=da7e7_role_name, color=discord.Color.gold(), reason="Monthly Top Role")
+    except Exception as e:
+        print(f"خطأ أثناء إنشاء الرتب تلقائياً في {guild.name}: {e}")
+
 def get_current_date_week():
     now = datetime.now()
     return now.strftime("%Y-%m-%d"), now.isocalendar()[1]
@@ -96,6 +111,10 @@ async def on_ready():
     else:
         print("⚠️ تنبيه: لم يتم العثور على رابط قاعدة البيانات DATABASE_URL!")
     
+    # إنشاء الرتب في كل السيرفرات فور تشغيل البوت
+    for guild in bot.guilds:
+        await create_default_roles(guild)
+
     check_study_proofs.start()
     round_announcer.start()
     daily_summary_task.start()
@@ -109,13 +128,11 @@ async def on_voice_state_update(member, before, after):
     
     study_channel = bot.get_channel(STUDY_CHANNEL_ID)
 
-    # عند الانضمام لروم المذاكرة
     if after.channel and after.channel.id == VOICE_CHANNEL_ID and before.channel != after.channel:
         user_join_time[member.id] = datetime.now()
         if study_channel:
             await study_channel.send(f" أهلاً بك يا {member.mention}! تم تسجيل دخولك لروم المذاكرة الصوتية. معك مهلة **{STUDY_TIMEOUT_MINUTES} دقيقة** لإرسال أول إثبات مذاكرة 📸⏳")
 
-    # عند مغادرة روم المذاكرة
     elif before.channel and before.channel.id == VOICE_CHANNEL_ID and after.channel != before.channel:
         if member.id in user_join_time:
             time_spent = datetime.now() - user_join_time[member.id]
@@ -126,11 +143,13 @@ async def on_voice_state_update(member, before, after):
             user_last_proof.pop(member.id, None)
             warned_users.discard(member.id)
 
+# معالجة الرسائل والأوامر (مع وبدون بريفيكس)
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
+    # استقبال إثبات المذاكرة بالصور
     if message.channel.id == STUDY_CHANNEL_ID and message.attachments:
         if any(att.content_type and att.content_type.startswith('image/') for att in message.attachments):
             now = datetime.now()
@@ -143,10 +162,31 @@ async def on_message(message):
             await message.add_reaction("✅")
             await message.reply(f"تمام عاش يا بطل! تم تسجيل إثبات المذاكرة. معاك مهلة لحد الساعة **{formatted_time}** ⏳")
 
+    # دعم الأوامر بدون بريفيكس (!)
+    content = message.content.strip().lower()
+    ctx = await bot.get_context(message)
+    
+    if not message.content.startswith(bot.command_prefix):
+        if content in ["باقي", "الوقت", "الباقي", "remaining"]:
+            ctx.command = bot.get_command("remaining")
+            if ctx.command:
+                await bot.invoke(ctx)
+                return
+        elif content in ["توب", "المتصدرين", "الترتيب", "top"]:
+            ctx.command = bot.get_command("top")
+            if ctx.command:
+                await bot.invoke(ctx)
+                return
+        elif content in ["احصائيات", "إحصائيات", "ساعاتي", "معلوماتي", "stats"]:
+            ctx.command = bot.get_command("stats")
+            if ctx.command:
+                await bot.invoke(ctx)
+                return
+
     await bot.process_commands(message)
 
 # أمر الوقت الباقي
-@bot.command(name="remaining", aliases=["باقي", "الوقت"])
+@bot.command(name="remaining", aliases=["باقي", "الوقت", "الباقي"])
 async def check_remaining_time(ctx):
     user_id = ctx.author.id
     if user_id not in user_join_time and user_id not in user_last_proof:
@@ -168,7 +208,7 @@ async def check_remaining_time(ctx):
     await ctx.send(f"⏳ {ctx.author.mention} باقي لك **{mins} دقيقة و {secs} ثانية** على انتهاء المهلة الحالية.")
 
 # أمر إحصائيات المستخدم الفردي
-@bot.command(name="stats", aliases=["احصائيات"])
+@bot.command(name="stats", aliases=["احصائيات", "إحصائيات", "ساعاتي", "معلوماتي"])
 async def show_stats(ctx, target_member: discord.Member = None):
     member = target_member or ctx.author
     conn = get_db_connection()
@@ -199,8 +239,8 @@ async def show_stats(ctx, target_member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
-# أمر المتصدرين المصلح
-@bot.command(name="top", aliases=["المتصدرين"])
+# أمر المتصدرين المصلح والمطور
+@bot.command(name="top", aliases=["المتصدرين", "توب", "الترتيب"])
 async def leaderboard(ctx):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -225,17 +265,24 @@ async def leaderboard(ctx):
     description = ""
     
     for i, (u_id, weekly_mins) in enumerate(sorted_users):
-        try:
-            user = bot.get_user(u_id) or await bot.fetch_user(u_id)
-            name = user.display_name if user else f"عضو {u_id}"
-        except Exception:
-            name = f"عضو {u_id}"
+        name = f"عضو ({u_id})"
+        if ctx.guild:
+            member = ctx.guild.get_member(u_id)
+            if member:
+                name = member.display_name
+            else:
+                try:
+                    user = await bot.fetch_user(u_id)
+                    if user:
+                        name = user.display_name
+                except Exception:
+                    pass
         description += f"{medals[i]} **{name}**: {weekly_mins} دقيقة ({round(weekly_mins/60, 1)} ساعة)\n"
         
     embed.description = description
     await ctx.send(embed=embed)
 
-# نظام الراوندات التلقائي (ساعتين مذاكرة + نصف ساعة بريك، تبدأ من 6 صباحاً)
+# نظام الراوندات التلقائي
 @tasks.loop(minutes=1)
 async def round_announcer():
     global last_announced_round_status
@@ -267,7 +314,7 @@ async def round_announcer():
             last_announced_round_status = status
             await study_channel.send(f"☕ **وقت البريك للراوند {round_num}!**\nخذوا راحة لمدة 30 دقيقة، ارتاحوا واشربوا مية ورجعوا أقوى! 🧘‍♂️✨")
 
-# إرسال الملخص اليومي لليوزر المطلوب
+# إرسال الملخص اليومي
 @tasks.loop(hours=24)
 async def daily_summary_task():
     conn = get_db_connection()
@@ -294,11 +341,13 @@ async def daily_summary_task():
             except Exception as e:
                 print(f"تعذر إرسال رسالة خاصة لـ {SUMMARY_USERNAME}: {e}")
 
-# تحديث وتوزيع الرتب أوتوماتيكياً (Top 1-5 والدحيح الشهر)
-@tasks.loop(hours=6)
+# تحديث وتوزيع الرتب أوتوماتيكياً
+@tasks.loop(hours=1)
 async def update_roles_task():
     for guild in bot.guilds:
         try:
+            await create_default_roles(guild)
+            
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT user_id FROM user_stats ORDER BY weekly DESC LIMIT 5")
@@ -312,30 +361,21 @@ async def update_roles_task():
             role_names = {1: "Top 1", 2: "Top 2", 3: "Top 3", 4: "Top 4", 5: "Top 5"}
             da7e7_role_name = "الدحيح الشهر"
 
-            role_objs = {}
-            for pos, rname in role_names.items():
-                r = discord.utils.get(guild.roles, name=rname)
-                if not r:
-                    r = await guild.create_role(name=rname, reason="Study Bot Leaderboard Role")
-                role_objs[pos] = r
-
+            role_objs = {pos: discord.utils.get(guild.roles, name=rname) for pos, rname in role_names.items()}
             da7e7_role = discord.utils.get(guild.roles, name=da7e7_role_name)
-            if not da7e7_role:
-                da7e7_role = await guild.create_role(name=da7e7_role_name, color=discord.Color.gold(), reason="Monthly Top Role")
 
-            # مسح الرتب القديمة وتوزيع الرتب الأسبوعية الجديدة
             for pos, r_obj in role_objs.items():
-                for m in r_obj.members:
-                    await m.remove_roles(r_obj)
+                if r_obj:
+                    for m in r_obj.members:
+                        await m.remove_roles(r_obj)
 
             for index, (u_id,) in enumerate(top_weekly):
                 pos = index + 1
                 member = guild.get_member(u_id)
-                if member and pos in role_objs:
+                if member and pos in role_objs and role_objs[pos]:
                     await member.add_roles(role_objs[pos])
 
-            # رتبة دحيح الشهر
-            if top_monthly:
+            if top_monthly and da7e7_role:
                 m_uid = top_monthly[0]
                 for m in da7e7_role.members:
                     await m.remove_roles(da7e7_role)
@@ -346,7 +386,7 @@ async def update_roles_task():
         except Exception as e:
             print(f"خطأ أثناء تحديث الرتب في السيرفر {guild.name}: {e}")
 
-# اللوب المسؤول عن التحذير والطرد للمقصرين
+# اللوب المسؤول عن التحذير والطرد
 @tasks.loop(minutes=1)
 async def check_study_proofs():
     voice_channel = bot.get_channel(VOICE_CHANNEL_ID)
