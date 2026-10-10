@@ -4,6 +4,7 @@ import psycopg2
 import discord
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -19,6 +20,7 @@ STUDY_CHANNEL_ID = 1323411341033341020
 VOICE_CHANNEL_ID = 1323411341192597558
 STUDY_TIMEOUT_MINUTES = 25
 SUMMARY_USERNAME = "ilovemyself03821"
+EGYPT_TZ = ZoneInfo("Africa/Cairo")  # توقيت مصر المحلي
 # ==========================================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -63,7 +65,7 @@ async def create_default_roles(guild):
         print(f"خطأ أثناء إنشاء الرتب تلقائياً في {guild.name}: {e}")
 
 def get_current_date_week():
-    now = datetime.now()
+    now = datetime.now(EGYPT_TZ)
     return now.strftime("%Y-%m-%d"), now.isocalendar()[1]
 
 def update_user_minutes(user_id, minutes):
@@ -106,7 +108,7 @@ def update_user_minutes(user_id, minutes):
 async def on_ready():
     if DATABASE_URL:
         init_db()
-        print(f'تم تسجيل الدخول بنجاح باسم: {bot.user.name} ومتصل بقاعدة البيانات السحابية!')
+        print(f'تم تسجيل الدخول بنجاح باسم: {bot.user.name} ومتصل بقاعدة البيانات السحابية بتوقيت مصر!')
     else:
         print("⚠️ تنبيه: لم يتم العثور على رابط قاعدة البيانات DATABASE_URL!")
     
@@ -126,13 +128,13 @@ async def on_voice_state_update(member, before, after):
     study_channel = bot.get_channel(STUDY_CHANNEL_ID)
 
     if after.channel and after.channel.id == VOICE_CHANNEL_ID and before.channel != after.channel:
-        user_join_time[member.id] = datetime.now()
+        user_join_time[member.id] = datetime.now(EGYPT_TZ)
         if study_channel:
             await study_channel.send(f"أهلاً بك يا {member.mention}! تم تسجيل دخولك لروم المذاكرة الصوتية. معك مهلة **{STUDY_TIMEOUT_MINUTES} دقيقة** لإرسال أول إثبات مذاكرة 📸⏳")
 
     elif before.channel and before.channel.id == VOICE_CHANNEL_ID and after.channel != before.channel:
         if member.id in user_join_time:
-            time_spent = datetime.now() - user_join_time[member.id]
+            time_spent = datetime.now(EGYPT_TZ) - user_join_time[member.id]
             minutes = int(time_spent.total_seconds() // 60)
             if minutes > 0:
                 update_user_minutes(member.id, minutes)
@@ -147,7 +149,7 @@ async def on_message(message):
 
     if message.channel.id == STUDY_CHANNEL_ID and message.attachments:
         if any(att.content_type and att.content_type.startswith('image/') for att in message.attachments):
-            now = datetime.now()
+            now = datetime.now(EGYPT_TZ)
             user_last_proof[message.author.id] = now
             warned_users.discard(message.author.id)
             
@@ -186,7 +188,7 @@ async def check_remaining_time(ctx):
         await ctx.send(f"❌ {ctx.author.mention} أنت لست داخل روم المذاكرة الصوتية أو لم تبدأ جلستك بعد!")
         return
 
-    now = datetime.now()
+    now = datetime.now(EGYPT_TZ)
     start_time = user_last_proof.get(user_id) or user_join_time.get(user_id)
     deadline = start_time + timedelta(minutes=STUDY_TIMEOUT_MINUTES)
     remaining_delta = deadline - now
@@ -214,7 +216,7 @@ async def show_stats(ctx, target_member: discord.Member = None):
     
     current_session = 0
     if member.id in user_join_time:
-        current_session = int((datetime.now() - user_join_time[member.id]).total_seconds() // 60)
+        current_session = int((datetime.now(EGYPT_TZ) - user_join_time[member.id]).total_seconds() // 60)
 
     daily_total = daily + current_session
     weekly_total = weekly + current_session
@@ -243,7 +245,7 @@ async def leaderboard(ctx):
 
         totals = {row[0]: row[1] for row in rows}
         for u_id, join_t in user_join_time.items():
-            active_mins = int((datetime.now() - join_t).total_seconds() // 60)
+            active_mins = int((datetime.now(EGYPT_TZ) - join_t).total_seconds() // 60)
             totals[u_id] = totals.get(u_id, 0) + active_mins
 
         if not totals:
@@ -266,6 +268,7 @@ async def leaderboard(ctx):
         await ctx.send(f"حدث خطأ أثناء جلب قائمة المتصدرين: {e}")
         print(f"Error in leaderboard command: {e}")
 
+# نظام الراوندات التلقائي بتوقيت مصر وبدون سبام عند إعادة التشغيل
 @tasks.loop(minutes=1)
 async def round_announcer():
     global last_announced_round_status
@@ -273,7 +276,7 @@ async def round_announcer():
     if not study_channel:
         return
     
-    now = datetime.now()
+    now = datetime.now(EGYPT_TZ)
     today_6am = now.replace(hour=6, minute=0, second=0, microsecond=0)
     if now < today_6am:
         today_6am -= timedelta(days=1)
@@ -282,19 +285,25 @@ async def round_announcer():
     if diff_mins < 0:
         return
     
-    cycle_mins = 150
+    cycle_mins = 150  # 120 دقيقة مذاكرة + 30 دقيقة بريك
     position_in_cycle = diff_mins % cycle_mins
     round_num = (diff_mins // cycle_mins) + 1
     
     if position_in_cycle < 120:
         status = f"study_{round_num}"
-        if last_announced_round_status != status:
-            last_announced_round_status = status
-            await study_channel.send(f"🔔 **بدء الراوند رقم {round_num}!**\n⏰ وقت المذاكرة الجادة بدأ (ساعتان). شدوا حيلكم يا أبطال! 💪📚")
     else:
         status = f"break_{round_num}"
-        if last_announced_round_status != status:
-            last_announced_round_status = status
+    
+    # تهيئة أولية عند تشغيل البوت لأول مرة لمنع إرسال إعلان قديم
+    if last_announced_round_status is None:
+        last_announced_round_status = status
+        return
+    
+    if last_announced_round_status != status:
+        last_announced_round_status = status
+        if position_in_cycle < 120:
+            await study_channel.send(f"🔔 **بدء الراوند رقم {round_num}!**\n⏰ وقت المذاكرة الجادة بدأ (ساعتان). شدوا حيلكم يا أبطال! 💪📚")
+        else:
             await study_channel.send(f"☕ **وقت البريك للراوند {round_num}!**\nخذوا راحة لمدة 30 دقيقة، ارتاحوا واشربوا مية ورجعوا أقوى! 🧘‍♂️✨")
 
 @tasks.loop(hours=24)
@@ -380,7 +389,7 @@ async def check_study_proofs():
     if not voice_channel:
         return
 
-    now = datetime.now()
+    now = datetime.now(EGYPT_TZ)
     for member in voice_channel.members:
         if member.bot:
             continue
