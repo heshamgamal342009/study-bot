@@ -18,22 +18,20 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 STUDY_CHANNEL_ID = 1323411341033341020  # آي دي قناة الشات المخصصة للصور
 VOICE_CHANNEL_ID = 1323411341192597558  # آي دي روم المذاكرة الصوتية
 STUDY_TIMEOUT_MINUTES = 25              # مهلة إرسال الصورة (بالدقائق)
+SUMMARY_USERNAME = "ilovemyself03821"     # يوزر الشخص الذي سيرسل له الملخص اليومي
 # ==========================================
 
-# رابط قاعدة البيانات السحابية من متغيرات البيئة
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# القواميس المؤقتة في الذاكرة
 user_last_proof = {}  # {user_id: datetime}
 user_join_time = {}   # {user_id: datetime}
 warned_users = set()  # لتتبع من تم تنبيهه لمنع الإزعاج
+last_announced_round_status = None
 
 def get_db_connection():
-    """اتصال بقاعدة البيانات السحابية PostgreSQL"""
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
-    """إنشاء الجدول في قاعدة البيانات السحابية إذا لم يكن موجوداً"""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
@@ -55,9 +53,7 @@ def get_current_date_week():
     return now.strftime("%Y-%m-%d"), now.isocalendar()[1]
 
 def update_user_minutes(user_id, minutes):
-    """تحديث الدقائق في السحابة مع معالجة التصفير اليومي والأسبوعي"""
     today_str, current_week = get_current_date_week()
-    
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -66,11 +62,9 @@ def update_user_minutes(user_id, minutes):
     
     if row:
         daily, weekly, monthly, last_date, last_week = row
-        
         if last_date != today_str:
             daily = 0
             last_date = today_str
-            
         if last_week != current_week:
             weekly = 0
             last_week = current_week
@@ -98,20 +92,30 @@ def update_user_minutes(user_id, minutes):
 async def on_ready():
     if DATABASE_URL:
         init_db()
-        print(f'تم تسجيل الدخول بنجاح باسم: {bot.user.name} ومتصل بقاعدة البيانات السحابية بنجاح!')
+        print(f'تم تسجيل الدخول بنجاح باسم: {bot.user.name} ومتصل بقاعدة البيانات السحابية!')
     else:
         print("⚠️ تنبيه: لم يتم العثور على رابط قاعدة البيانات DATABASE_URL!")
+    
     check_study_proofs.start()
+    round_announcer.start()
+    daily_summary_task.start()
+    update_roles_task.start()
 
-# تتبع دخول وخروج الأعضاء من الروم الصوتية
+# تتبع الدخول والخروج مع الترحيب الفوري
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
         return
     
+    study_channel = bot.get_channel(STUDY_CHANNEL_ID)
+
+    # عند الانضمام لروم المذاكرة
     if after.channel and after.channel.id == VOICE_CHANNEL_ID and before.channel != after.channel:
         user_join_time[member.id] = datetime.now()
+        if study_channel:
+            await study_channel.send(f" أهلاً بك يا {member.mention}! تم تسجيل دخولك لروم المذاكرة الصوتية. معك مهلة **{STUDY_TIMEOUT_MINUTES} دقيقة** لإرسال أول إثبات مذاكرة 📸⏳")
 
+    # عند مغادرة روم المذاكرة
     elif before.channel and before.channel.id == VOICE_CHANNEL_ID and after.channel != before.channel:
         if member.id in user_join_time:
             time_spent = datetime.now() - user_join_time[member.id]
@@ -145,7 +149,6 @@ async def on_message(message):
 @bot.command(name="remaining", aliases=["باقي", "الوقت"])
 async def check_remaining_time(ctx):
     user_id = ctx.author.id
-    
     if user_id not in user_join_time and user_id not in user_last_proof:
         await ctx.send(f"❌ {ctx.author.mention} أنت لست داخل روم المذاكرة الصوتية أو لم تبدأ جلستك بعد!")
         return
@@ -154,23 +157,20 @@ async def check_remaining_time(ctx):
     start_time = user_last_proof.get(user_id) or user_join_time.get(user_id)
     deadline = start_time + timedelta(minutes=STUDY_TIMEOUT_MINUTES)
     remaining_delta = deadline - now
-    
     total_seconds = int(remaining_delta.total_seconds())
     
     if total_seconds <= 0:
-        await ctx.send(f"⚠️ {ctx.author.mention} لقد انتهت مهلتك تماماً! قم بإرسال صورة الإثبات فوراً وإلا سيتم إخراجك.")
+        await ctx.send(f"⚠️ {ctx.author.mention} لقد انتهت مهلتك تماماً! أرسل صورة الإثبات فوراً وإلا سيتم إخراجك.")
         return
         
     mins = total_seconds // 60
     secs = total_seconds % 60
-    
     await ctx.send(f"⏳ {ctx.author.mention} باقي لك **{mins} دقيقة و {secs} ثانية** على انتهاء المهلة الحالية.")
 
 # أمر إحصائيات المستخدم الفردي
 @bot.command(name="stats", aliases=["احصائيات"])
 async def show_stats(ctx, target_member: discord.Member = None):
     member = target_member or ctx.author
-    
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT daily, weekly, monthly FROM user_stats WHERE user_id = %s", (member.id,))
@@ -188,12 +188,8 @@ async def show_stats(ctx, target_member: discord.Member = None):
     weekly_total = weekly + current_session
     monthly_total = monthly + current_session
 
-    embed = discord.Embed(
-        title=f"📊 إحصائيات مذاكرة: {member.display_name}",
-        color=discord.Color.blue()
-    )
+    embed = discord.Embed(title=f"📊 إحصائيات مذاكرة: {member.display_name}", color=discord.Color.blue())
     embed.set_thumbnail(url=member.display_avatar.url)
-    
     embed.add_field(name="📅 اليوم", value=f"**{daily_total}** دقيقة ({round(daily_total/60, 1)} س)", inline=True)
     embed.add_field(name="🗓️ هذا الأسبوع (تراكمي)", value=f"**{weekly_total}** دقيقة ({round(weekly_total/60, 1)} س)", inline=True)
     embed.add_field(name="📆 هذا الشهر", value=f"**{monthly_total}** دقيقة ({round(monthly_total/60, 1)} س)", inline=True)
@@ -203,7 +199,7 @@ async def show_stats(ctx, target_member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
-# أمر المتصدرين
+# أمر المتصدرين المصلح
 @bot.command(name="top", aliases=["المتصدرين"])
 async def leaderboard(ctx):
     conn = get_db_connection()
@@ -224,28 +220,137 @@ async def leaderboard(ctx):
 
     sorted_users = sorted(totals.items(), key=lambda x: x[1], reverse=True)[:5]
     
-    embed = discord.Embed(
-        title="🏆 متصدري المذاكرة (المجموع التراكمي الأسبوعي)",
-        color=discord.Color.gold()
-    )
-    
+    embed = discord.Embed(title="🏆 متصدري المذاكرة (المجموع التراكمي الأسبوعي)", color=discord.Color.gold())
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     description = ""
     
     for i, (u_id, weekly_mins) in enumerate(sorted_users):
-        user = bot.get_user(u_id) or await bot.fetch_user(u_id)
-        name = user.display_name if user else "عضو"
+        try:
+            user = bot.get_user(u_id) or await bot.fetch_user(u_id)
+            name = user.display_name if user else f"عضو {u_id}"
+        except Exception:
+            name = f"عضو {u_id}"
         description += f"{medals[i]} **{name}**: {weekly_mins} دقيقة ({round(weekly_mins/60, 1)} ساعة)\n"
         
     embed.description = description
     await ctx.send(embed=embed)
 
-# اللوب المسؤول عن التحذير والطرد
+# نظام الراوندات التلقائي (ساعتين مذاكرة + نصف ساعة بريك، تبدأ من 6 صباحاً)
+@tasks.loop(minutes=1)
+async def round_announcer():
+    global last_announced_round_status
+    study_channel = bot.get_channel(STUDY_CHANNEL_ID)
+    if not study_channel:
+        return
+    
+    now = datetime.now()
+    today_6am = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    if now < today_6am:
+        today_6am -= timedelta(days=1)
+    
+    diff_mins = int((now - today_6am).total_seconds() // 60)
+    if diff_mins < 0:
+        return
+    
+    cycle_mins = 150  # 120 دقيقة مذاكرة + 30 دقيقة بريك
+    position_in_cycle = diff_mins % cycle_mins
+    round_num = (diff_mins // cycle_mins) + 1
+    
+    if position_in_cycle < 120:
+        status = f"study_{round_num}"
+        if last_announced_round_status != status:
+            last_announced_round_status = status
+            await study_channel.send(f"🔔 **بدء الراوند رقم {round_num}!**\n⏰ وقت المذاكرة الجادة بدأ (ساعتان). شدوا حيلكم يا أبطال! 💪📚")
+    else:
+        status = f"break_{round_num}"
+        if last_announced_round_status != status:
+            last_announced_round_status = status
+            await study_channel.send(f"☕ **وقت البريك للراوند {round_num}!**\nخذوا راحة لمدة 30 دقيقة، ارتاحوا واشربوا مية ورجعوا أقوى! 🧘‍♂️✨")
+
+# إرسال الملخص اليومي لليوزر المطلوب
+@tasks.loop(hours=24)
+async def daily_summary_task():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, daily, weekly FROM user_stats ORDER BY daily DESC LIMIT 5")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    if not rows:
+        return
+
+    summary_text = "📊 **الملخص اليومي لإحصائيات المذاكرة في السيرفر:**\n\n"
+    for r in rows:
+        u_id, daily, weekly = r
+        summary_text += f"- User ID `{u_id}`: اليوم = {daily} دقيقة | الأسبوع = {weekly} دقيقة\n"
+    
+    for guild in bot.guilds:
+        member = discord.utils.get(guild.members, name=SUMMARY_USERNAME) or discord.utils.get(guild.members, global_name=SUMMARY_USERNAME)
+        if member:
+            try:
+                await member.send(summary_text)
+                break
+            except Exception as e:
+                print(f"تعذر إرسال رسالة خاصة لـ {SUMMARY_USERNAME}: {e}")
+
+# تحديث وتوزيع الرتب أوتوماتيكياً (Top 1-5 والدحيح الشهر)
+@tasks.loop(hours=6)
+async def update_roles_task():
+    for guild in bot.guilds:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM user_stats ORDER BY weekly DESC LIMIT 5")
+            top_weekly = cursor.fetchall()
+            
+            cursor.execute("SELECT user_id FROM user_stats ORDER BY monthly DESC LIMIT 1")
+            top_monthly = cursor.fetchone()
+            cursor.close()
+            conn.close()
+
+            role_names = {1: "Top 1", 2: "Top 2", 3: "Top 3", 4: "Top 4", 5: "Top 5"}
+            da7e7_role_name = "الدحيح الشهر"
+
+            role_objs = {}
+            for pos, rname in role_names.items():
+                r = discord.utils.get(guild.roles, name=rname)
+                if not r:
+                    r = await guild.create_role(name=rname, reason="Study Bot Leaderboard Role")
+                role_objs[pos] = r
+
+            da7e7_role = discord.utils.get(guild.roles, name=da7e7_role_name)
+            if not da7e7_role:
+                da7e7_role = await guild.create_role(name=da7e7_role_name, color=discord.Color.gold(), reason="Monthly Top Role")
+
+            # مسح الرتب القديمة وتوزيع الرتب الأسبوعية الجديدة
+            for pos, r_obj in role_objs.items():
+                for m in r_obj.members:
+                    await m.remove_roles(r_obj)
+
+            for index, (u_id,) in enumerate(top_weekly):
+                pos = index + 1
+                member = guild.get_member(u_id)
+                if member and pos in role_objs:
+                    await member.add_roles(role_objs[pos])
+
+            # رتبة دحيح الشهر
+            if top_monthly:
+                m_uid = top_monthly[0]
+                for m in da7e7_role.members:
+                    await m.remove_roles(da7e7_role)
+                monthly_member = guild.get_member(m_uid)
+                if monthly_member:
+                    await monthly_member.add_roles(da7e7_role)
+
+        except Exception as e:
+            print(f"خطأ أثناء تحديث الرتب في السيرفر {guild.name}: {e}")
+
+# اللوب المسؤول عن التحذير والطرد للمقصرين
 @tasks.loop(minutes=1)
 async def check_study_proofs():
     voice_channel = bot.get_channel(VOICE_CHANNEL_ID)
     study_channel = bot.get_channel(STUDY_CHANNEL_ID)
-    
     if not voice_channel:
         return
 
@@ -255,7 +360,6 @@ async def check_study_proofs():
             continue
         
         last_time = user_last_proof.get(member.id)
-        
         if not last_time:
             join_t = user_join_time.get(member.id, now)
             elapsed = (now - join_t).total_seconds() / 60
