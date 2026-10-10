@@ -14,7 +14,7 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==========================================
-# ⚙️ إعددادات البوت والمهلة الزمنية
+# ⚙️ إعدادات البوت والمهلة الزمنية
 # ==========================================
 STUDY_CHANNEL_ID = 1323411341033341020
 VOICE_CHANNEL_ID = 1323411341192597558
@@ -120,33 +120,41 @@ async def on_ready():
     daily_summary_task.start()
     update_roles_task.start()
 
+# معالجة حركات الصوت مع منع الثغرات
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
         return
     
     study_channel = bot.get_channel(STUDY_CHANNEL_ID)
+    now = datetime.now(EGYPT_TZ)
 
+    # عند انضمام العضو للروم الصوتي
     if after.channel and after.channel.id == VOICE_CHANNEL_ID and before.channel != after.channel:
-        user_join_time[member.id] = datetime.now(EGYPT_TZ)
-        if study_channel:
-            await study_channel.send(f"أهلاً بك يا {member.mention}! تم تسجيل دخولك لروم المذاكرة الصوتية. معك مهلة **{STUDY_TIMEOUT_MINUTES} دقيقة** لإرسال أول إثبات مذاكرة 📸⏳")
+        if member.id not in user_last_proof and member.id not in user_join_time:
+            user_join_time[member.id] = now
+            if study_channel:
+                await study_channel.send(f"أهلاً بك يا {member.mention}! تم تسجيل دخولك لروم المذاكرة الصوتية. معك مهلة **{STUDY_TIMEOUT_MINUTES} دقيقة** لإرسال أول إثبات مذاكرة 📸⏳")
+        else:
+            if study_channel:
+                await study_channel.send(f"مرحباً بعودتك {member.mention}! ⚠️ تذكر أن مهلتك المستمرة لم تتجدد، يرجى إرسال الصورة في موعدها.")
 
+    # عند خروج العضو من الروم الصوتي
     elif before.channel and before.channel.id == VOICE_CHANNEL_ID and after.channel != before.channel:
         if member.id in user_join_time:
-            time_spent = datetime.now(EGYPT_TZ) - user_join_time[member.id]
+            time_spent = now - user_join_time[member.id]
             minutes = int(time_spent.total_seconds() // 60)
             if minutes > 0:
                 update_user_minutes(member.id, minutes)
-            del user_join_time[member.id]
-            user_last_proof.pop(member.id, None)
-            warned_users.discard(member.id)
+            
+            # نحتفظ بسجل وقته حتى لا يتلاعب بالخروج والدخول، ولا يمسح السجل إلا بعد تقديم الإثبات أو الطرد
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
+    # استقبال الصورة وإعادة ضبط مهلة الـ 25 دقيقة
     if message.channel.id == STUDY_CHANNEL_ID and message.attachments:
         if any(att.content_type and att.content_type.startswith('image/') for att in message.attachments):
             now = datetime.now(EGYPT_TZ)
@@ -268,7 +276,6 @@ async def leaderboard(ctx):
         await ctx.send(f"حدث خطأ أثناء جلب قائمة المتصدرين: {e}")
         print(f"Error in leaderboard command: {e}")
 
-# نظام الراوندات التلقائي بتوقيت مصر وبدون سبام عند إعادة التشغيل
 @tasks.loop(minutes=1)
 async def round_announcer():
     global last_announced_round_status
@@ -285,7 +292,7 @@ async def round_announcer():
     if diff_mins < 0:
         return
     
-    cycle_mins = 150  # 120 دقيقة مذاكرة + 30 دقيقة بريك
+    cycle_mins = 150
     position_in_cycle = diff_mins % cycle_mins
     round_num = (diff_mins // cycle_mins) + 1
     
@@ -294,7 +301,6 @@ async def round_announcer():
     else:
         status = f"break_{round_num}"
     
-    # تهيئة أولية عند تشغيل البوت لأول مرة لمنع إرسال إعلان قديم
     if last_announced_round_status is None:
         last_announced_round_status = status
         return
@@ -382,6 +388,7 @@ async def update_roles_task():
         except Exception as e:
             print(f"خطأ أثناء تحديث الرتب في السيرفر {guild.name}: {e}")
 
+# التحقق من الإثباتات مع مسح بيانات المهلة عند الطرد فقط
 @tasks.loop(minutes=1)
 async def check_study_proofs():
     voice_channel = bot.get_channel(VOICE_CHANNEL_ID)
@@ -413,6 +420,8 @@ async def check_study_proofs():
             try:
                 await member.move_to(None)
                 warned_users.discard(member.id)
+                user_join_time.pop(member.id, None)
+                user_last_proof.pop(member.id, None)
                 if study_channel:
                     await study_channel.send(f"🚨 {member.mention} تم إخراجك من روم المذاكرة الصوتية لعدم إرسال إثبات المذاكرة خلال الـ {STUDY_TIMEOUT_MINUTES} دقيقة الماضية!")
             except Exception as e:
